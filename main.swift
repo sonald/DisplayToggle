@@ -17,7 +17,9 @@ let configureDisplayEnabled: ConfigureDisplayEnabled? = {
 func activeDisplays() -> [CGDirectDisplayID] {
     var ids = [CGDirectDisplayID](repeating: 0, count: 16), n: UInt32 = 0
     CGGetActiveDisplayList(16, &ids, &n)
-    return Array(ids.prefix(Int(n)))
+    // With nothing left to show on, macOS adds a placeholder display (a new ID each time, vendor 'unkn',
+    // model 'virt') that nobody can see. Seen on macOS 27.2. Not a real display, so it never counts.
+    return ids.prefix(Int(n)).filter { CGDisplayVendorNumber($0) != 0x756E6B6E || CGDisplayModelNumber($0) != 0x76697274 }
 }
 
 func setDisplay(_ id: CGDirectDisplayID, enabled: Bool) -> String? {
@@ -51,6 +53,9 @@ struct Display: Identifiable, Codable, Equatable {
     // Last known state of every display we have seen, persisted so a disabled
     // display still has a tile (and a switch to come back) after relaunch.
     private var known: [CGDirectDisplayID: Display] = [:]
+    // We forced the panel on because nothing else was left; turn it off again when an external returns.
+    // ponytail: in memory only, so quitting while undocked just leaves the panel on.
+    private var restoreBuiltinOff = false
 
     init() {
         if let data = UserDefaults.standard.data(forKey: key),
@@ -61,6 +66,16 @@ struct Display: Identifiable, Codable, Equatable {
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
+        }
+        // A black screen has no other way out, so don't rely on the notification firing with zero
+        // displays. This also retries a failed switch; otherwise it only reads the display list.
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                let active = activeDisplays()
+                let externalBack = active.contains { CGDisplayIsBuiltin($0) == 0 }
+                guard let self, active.isEmpty || (self.restoreBuiltinOff && externalBack) else { return }
+                self.refresh()
+            }
         }
     }
 
@@ -86,11 +101,25 @@ struct Display: Identifiable, Codable, Equatable {
         }
         displays = known.values.sorted { $0.id < $1.id }
         if let data = try? JSONEncoder().encode(displays) { UserDefaults.standard.set(data, forKey: key) }
+
+        guard let panel = known.values.first(where: \.builtin)?.id else { return }
+        if active.isEmpty {
+            error = setDisplay(panel, enabled: true)
+            if error == nil { restoreBuiltinOff = true }
+        } else if restoreBuiltinOff, active.contains(panel), active.contains(where: { $0 != panel }) {
+            error = setDisplay(panel, enabled: false)
+            if error == nil {
+                restoreBuiltinOff = false
+                known[panel]?.offByApp = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.refresh() }
+            }
+        }
     }
 
     func toggle(_ d: Display) {
         error = nil
         if let err = setDisplay(d.id, enabled: !d.isOn) { error = err; return }
+        if d.builtin { restoreBuiltinOff = false }  // the user decided; don't override it later
         if d.isOn { known[d.id]?.offByApp = true }
         // ponytail: screen-change notification usually fires; the delayed refresh covers when it doesn't.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.refresh() }

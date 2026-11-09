@@ -32,6 +32,11 @@ The menu-bar icon shows `laptopcomputer` when the panel is on and `laptopcompute
 
 - Needs at least one other display connected. The app refuses to turn off the built-in panel if it
   is the only display, so you can't lock yourself out.
+- If you unplug every external while the panel is off, the app turns the panel back on within about
+  2 seconds, then turns it off again when an external returns. Switching the panel by hand in between
+  cancels that. Quitting the app while undocked also cancels it, leaving the panel on. Detection
+  ignores the invisible placeholder display macOS adds at that moment (vendor `unkn`, model `virt`),
+  so an OS update that changes those values would break it. Verified on macOS 27.2 by unplugging.
 - The change is per-session: log out, reboot, sleep/wake or close-and-reopen the lid brings the
   panel back on its own. The menu label follows the real state.
 - Every display's last known name and position is cached in UserDefaults, since a disconnected
